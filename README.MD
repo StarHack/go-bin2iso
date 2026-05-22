@@ -1,6 +1,6 @@
 # go-bin2iso
 
-This tool convers `bin/cue` images to `iso` images. Could come in handy for old, uhm, backup copies.
+This tool converts `bin/cue` images to `iso` images. Could come in handy for old, uhm, backup copies.
 
 ## Building
 

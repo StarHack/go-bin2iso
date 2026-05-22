@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build release binaries
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            suffix: macos-intel64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            suffix: macos-arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            suffix: windows-x64
+            ext: ".exe"
+          - goos: linux
+            goarch: amd64
+            suffix: linux-x64
+            ext: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o "dist/bin2iso-${{ matrix.suffix }}${{ matrix.ext }}" ./bin2iso.go
+
+      - name: Package
+        run: |
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "bin2iso-${{ matrix.suffix }}.zip" "bin2iso-${{ matrix.suffix }}${{ matrix.ext }}"
+          else
+            tar -czf "bin2iso-${{ matrix.suffix }}.tar.gz" "bin2iso-${{ matrix.suffix }}${{ matrix.ext }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin2iso-${{ matrix.suffix }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
