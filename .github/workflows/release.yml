@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build release binaries
+    name: Build ${{ matrix.suffix }}
     runs-on: ubuntu-latest
 
     strategy:
@@ -50,7 +50,7 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o "dist/bin2iso-${{ matrix.suffix }}${{ matrix.ext }}" ./bin2iso.go
+          go build -trimpath -ldflags="-s -w" -o "dist/bin2iso-${{ matrix.suffix }}${{ matrix.ext }}" .
 
       - name: Package
         run: |
