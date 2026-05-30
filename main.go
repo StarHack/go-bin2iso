@@ -27,7 +27,7 @@ var syncPattern = []byte{0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0
 
 func main() {
 	if len(os.Args) < 2 || len(os.Args) > 3 {
-		fatal("usage: bin2iso input.bin [output.iso]")
+		fatal("usage: bin2iso input.{bin,img,cue} [output.iso]")
 	}
 
 	inPath := os.Args[1]
@@ -44,12 +44,17 @@ func main() {
 		fatal("input and output paths are the same")
 	}
 
-	info, err := detectLayout(inPath)
+	imagePath, cuePath, err := resolveInput(inPath)
 	if err != nil {
 		fatal(err.Error())
 	}
 
-	if err := convert(inPath, outPath, info); err != nil {
+	info, err := detectLayout(imagePath, cuePath)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	if err := convert(imagePath, outPath, info); err != nil {
 		_ = os.Remove(outPath)
 		fatal(err.Error())
 	}
@@ -71,10 +76,132 @@ func samePath(a, b string) bool {
 	return aa == bb
 }
 
-func detectLayout(binPath string) (trackInfo, error) {
-	cuePath := findCue(binPath)
+func resolveInput(inputPath string) (imagePath, cuePath string, err error) {
+	switch strings.ToLower(filepath.Ext(inputPath)) {
+	case ".cue":
+		return resolveFromCue(inputPath)
+	case ".bin", ".img":
+		return inputPath, findCue(inputPath), nil
+	default:
+		return "", "", fmt.Errorf("unsupported input file type %q; use .bin, .img, or .cue", filepath.Ext(inputPath))
+	}
+}
+
+func resolveFromCue(inputPath string) (string, string, error) {
+	dir := filepath.Dir(inputPath)
+	cueBase := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+
+	ti, err := parseCue(inputPath, "")
+	if err != nil {
+		return "", inputPath, err
+	}
+
+	imagePath := findImageFile(dir, cueBase, ti.FileName)
+	if imagePath == "" {
+		ref := ti.FileName
+		if ref == "" {
+			ref = cueBase + ".bin/.img"
+		}
+		return "", inputPath, fmt.Errorf("CUE references %q but no matching .bin or .img file was found", ref)
+	}
+
+	return imagePath, inputPath, nil
+}
+
+func findImageFile(dir, cueBase, referenced string) string {
+	if referenced != "" {
+		if p := findNamedFile(dir, referenced); p != "" && isImageExt(p) {
+			return p
+		}
+	}
+
+	if p := findFileByBase(dir, cueBase, ".bin", ".img"); p != "" {
+		return p
+	}
+
+	if referenced != "" {
+		refBase := strings.TrimSuffix(filepath.Base(referenced), filepath.Ext(referenced))
+		if !strings.EqualFold(refBase, cueBase) {
+			if p := findFileByBase(dir, refBase, ".bin", ".img"); p != "" {
+				return p
+			}
+		}
+	}
+
+	return ""
+}
+
+func findFileByBase(dir, base string, extensions ...string) string {
+	for _, ext := range extensions {
+		candidates := []string{
+			filepath.Join(dir, base+ext),
+			filepath.Join(dir, base+strings.ToUpper(ext)),
+		}
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ext := filepath.Ext(name)
+		for _, wantExt := range extensions {
+			if strings.EqualFold(ext, wantExt) && strings.EqualFold(strings.TrimSuffix(name, ext), base) {
+				return filepath.Join(dir, name)
+			}
+		}
+	}
+
+	return ""
+}
+
+func findNamedFile(dir, name string) string {
+	p := filepath.Join(dir, name)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.EqualFold(e.Name(), name) {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+
+	return ""
+}
+
+func isImageExt(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".bin" || ext == ".img"
+}
+
+func sameBaseName(a, b string) bool {
+	aBase := strings.TrimSuffix(filepath.Base(a), filepath.Ext(a))
+	bBase := strings.TrimSuffix(filepath.Base(b), filepath.Ext(b))
+	return strings.EqualFold(aBase, bBase)
+}
+
+func detectLayout(imagePath, cuePath string) (trackInfo, error) {
 	if cuePath != "" {
-		ti, err := parseCue(cuePath, binPath)
+		ti, err := parseCue(cuePath, imagePath)
 		if err != nil {
 			return trackInfo{}, err
 		}
@@ -82,7 +209,7 @@ func detectLayout(binPath string) (trackInfo, error) {
 		return ti, nil
 	}
 
-	f, err := os.Open(binPath)
+	f, err := os.Open(imagePath)
 	if err != nil {
 		return trackInfo{}, err
 	}
@@ -115,49 +242,22 @@ func detectLayout(binPath string) (trackInfo, error) {
 		return trackInfo{}, errors.New("2352-byte sectors detected, but sector sync/header was not recognized and no matching CUE file was found")
 	}
 
-	return trackInfo{}, errors.New("could not detect BIN layout; provide a matching CUE file or a 2048-byte-sector ISO-style BIN")
+	return trackInfo{}, errors.New("could not detect disc image layout; provide a matching CUE file or a 2048-byte-sector image")
 }
 
-func findCue(binPath string) string {
-	dir := filepath.Dir(binPath)
-	base := strings.TrimSuffix(filepath.Base(binPath), filepath.Ext(binPath))
-	candidates := []string{
-		filepath.Join(dir, base+".cue"),
-		filepath.Join(dir, base+".CUE"),
-	}
-
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.EqualFold(filepath.Ext(name), ".cue") && strings.EqualFold(strings.TrimSuffix(name, filepath.Ext(name)), base) {
-			return filepath.Join(dir, name)
-		}
-	}
-
-	return ""
+func findCue(imagePath string) string {
+	dir := filepath.Dir(imagePath)
+	base := strings.TrimSuffix(filepath.Base(imagePath), filepath.Ext(imagePath))
+	return findFileByBase(dir, base, ".cue")
 }
 
-func parseCue(cuePath, binPath string) (trackInfo, error) {
+func parseCue(cuePath, imagePath string) (trackInfo, error) {
 	f, err := os.Open(cuePath)
 	if err != nil {
 		return trackInfo{}, err
 	}
 	defer f.Close()
 
-	targetBase := filepath.Base(binPath)
 	var currentFile string
 	var chosen *trackInfo
 	var current *trackInfo
@@ -188,7 +288,7 @@ func parseCue(cuePath, binPath string) (trackInfo, error) {
 				current = nil
 				continue
 			}
-			if isDataMode(mode) && (currentFile == "" || strings.EqualFold(currentFile, targetBase)) && chosen == nil {
+			if isDataMode(mode) && chosen == nil && trackMatchesImage(currentFile, imagePath) {
 				cp := *current
 				chosen = &cp
 			}
@@ -202,7 +302,7 @@ func parseCue(cuePath, binPath string) (trackInfo, error) {
 			}
 			current.IndexLBA = lba
 			current.HasIndex = true
-			if chosen != nil && chosen.Mode == current.Mode && strings.EqualFold(chosen.FileName, current.FileName) {
+			if chosen != nil && chosen.Mode == current.Mode && sameBaseName(chosen.FileName, current.FileName) {
 				chosen.IndexLBA = lba
 				chosen.HasIndex = true
 			}
@@ -214,10 +314,23 @@ func parseCue(cuePath, binPath string) (trackInfo, error) {
 	}
 
 	if chosen == nil {
-		return trackInfo{}, errors.New("matching CUE file found, but no supported data track for this BIN was found")
+		if imagePath == "" {
+			return trackInfo{}, errors.New("CUE file found, but no supported data track was found")
+		}
+		return trackInfo{}, errors.New("matching CUE file found, but no supported data track for this image was found")
 	}
 
 	return *chosen, nil
+}
+
+func trackMatchesImage(cueFile, imagePath string) bool {
+	if imagePath == "" {
+		return true
+	}
+	if cueFile == "" {
+		return true
+	}
+	return sameBaseName(cueFile, imagePath)
 }
 
 func sectorSizeForMode(mode string) (int, bool) {
@@ -271,7 +384,7 @@ func convert(inPath, outPath string, ti trackInfo) error {
 
 	start := ti.IndexLBA * int64(ti.Sector)
 	if start < 0 || start > st.Size() {
-		return errors.New("CUE index points outside BIN file")
+		return errors.New("CUE index points outside image file")
 	}
 
 	if _, err := in.Seek(start, io.SeekStart); err != nil {
